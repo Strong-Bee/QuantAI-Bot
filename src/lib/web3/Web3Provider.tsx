@@ -16,31 +16,29 @@ import {
 import {
   QueryClientProvider,
   QueryClient,
-} from "@tanstack/react-query";
+} from '@tanstack/react-query';
 
 const config = getDefaultConfig({
-  appName: 'QuantAI Bot',
-  projectId: 'YOUR_PROJECT_ID', // Replace with your WalletConnect Project ID
+  appName: 'QuantAI Trading Bot',
+  projectId: 'YOUR_PROJECT_ID', // Placeholder, user will need to provide their own
   chains: [mainnet, polygon, optimism, arbitrum, base],
-  ssr: true, // If your dApp uses server side rendering (SSR)
+  ssr: false, // If your dApp uses server side rendering (SSR)
 });
 
 const queryClient = new QueryClient();
 
-export const Web3Provider = ({ children }: { children: React.ReactNode }) => {
+export function Web3Provider({ children }: { children: React.ReactNode }) {
   return (
     <WagmiProvider config={config}>
       <QueryClientProvider client={queryClient}>
         <RainbowKitProvider theme={darkTheme({
           accentColor: '#10b981',
           accentColorForeground: 'black',
-          borderRadius: 'large',
-          fontStack: 'system',
-          overlayBlur: 'small',
+          borderRadius: 'medium',
         })}>
           {children}
         </RainbowKitProvider>
       </QueryClientProvider>
     </WagmiProvider>
   );
-};
+}

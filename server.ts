@@ -7,6 +7,7 @@ import { Server } from "socket.io";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { TradingBot } from "./src/lib/trading/TradingBot";
+import { BacktestEngine } from "./src/lib/trading/BacktestEngine";
 
 async function startServer() {
   const app = express();
@@ -19,9 +20,8 @@ async function startServer() {
 
   const PORT = 3000;
 
-  // Initialize Trading Bot
-  const bot = new TradingBot(io);
-  bot.start();
+  const userBots = new Map<string, TradingBot>();
+  const userBacktestEngines = new Map<string, BacktestEngine>();
 
   // API Routes
   app.get("/api/health", (req, res) => {
@@ -35,24 +35,68 @@ async function startServer() {
   // Socket.io connection
   io.on("connection", (socket) => {
     console.log("Client connected to dashboard");
-    
-    // Send initial status
-    socket.emit('bot_status', { isRunning: bot['isRunning'], isDemoMode: bot['isDemoMode'] });
+    let currentUserId: string | null = null;
+
+    socket.on('auth', (userId: string) => {
+      if (currentUserId && currentUserId !== userId) {
+        socket.leave(currentUserId);
+      }
+      currentUserId = userId;
+      socket.join(userId);
+      console.log(`User ${userId} authenticated`);
+
+      if (!userBots.has(userId)) {
+        const newBot = new TradingBot(io, userId);
+        newBot.start();
+        userBots.set(userId, newBot);
+        userBacktestEngines.set(userId, new BacktestEngine(newBot.getDataEngine()));
+      }
+
+      const bot = userBots.get(userId)!;
+      // Send initial status
+      bot.broadcastStatus();
+    });
 
     socket.on('set_mode', (mode: 'demo' | 'real') => {
-      bot.setMode(mode);
+      if (currentUserId) userBots.get(currentUserId)?.setMode(mode);
     });
 
     socket.on('toggle_bot', () => {
-      bot.toggleBot();
+      if (currentUserId) userBots.get(currentUserId)?.toggleBot();
     });
 
     socket.on('update_credentials', (creds: { apiKey: string, secret: string }) => {
-      bot.updateCredentials(creds.apiKey, creds.secret);
+      if (currentUserId) userBots.get(currentUserId)?.updateCredentials(creds.apiKey, creds.secret);
+    });
+
+    socket.on('update_ai_settings', (settings: any) => {
+      if (currentUserId) userBots.get(currentUserId)?.updateAiSettings(settings);
+    });
+
+    socket.on('close_position', (id: string) => {
+      if (currentUserId) userBots.get(currentUserId)?.closePosition(id);
+    });
+
+    socket.on('refresh_data', () => {
+      if (currentUserId) userBots.get(currentUserId)?.refreshData();
+    });
+
+    socket.on('run_backtest', async (params: { symbol: string, timeframe: string, limit: number }) => {
+      if (!currentUserId) return;
+      try {
+        socket.emit('backtest_started');
+        const engine = userBacktestEngines.get(currentUserId);
+        if (engine) {
+          const results = await engine.run(params.symbol, params.timeframe, params.limit);
+          socket.emit('backtest_result', results);
+        }
+      } catch (error: any) {
+        socket.emit('backtest_error', error.message || 'Failed to run backtest');
+      }
     });
 
     socket.on("disconnect", () => {
-      console.log("Client disconnected");
+      console.log(`Client disconnected ${currentUserId || ''}`);
     });
   });
 

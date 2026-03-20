@@ -47,6 +47,8 @@ import { AdvancedRealTimeChart } from 'react-ts-tradingview-widgets';
 import { format } from 'date-fns';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { Toaster, toast } from 'sonner';
+
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { useAccount } from 'wagmi';
 
@@ -94,6 +96,7 @@ interface DexPair {
 }
 
 export default function App() {
+  const { address, isConnected } = useAccount();
   const [socket, setSocket] = useState<Socket | null>(null);
   const [logs, setLogs] = useState<TradeLog[]>([]);
   const [topPairs, setTopPairs] = useState<TopPair[]>([]);
@@ -104,16 +107,28 @@ export default function App() {
   const [isRunning, setIsRunning] = useState(true);
   const [isDemoMode, setIsDemoMode] = useState(true);
   const [showApiModal, setShowApiModal] = useState(false);
-  const { address: walletAddress, isConnected } = useAccount();
+  
+  // Settings State
   const [apiKey, setApiKey] = useState('');
   const [apiSecret, setApiSecret] = useState('');
+  const [geminiKey, setGeminiKey] = useState('');
+  const [useGemini, setUseGemini] = useState(true);
+  const [openAiKey, setOpenAiKey] = useState('');
+  const [useOpenAi, setUseOpenAi] = useState(false);
+
   const [balance, setBalance] = useState(1000.00);
   const [pnl, setPnl] = useState(0.00);
   const [selectedSymbol, setSelectedSymbol] = useState('BINANCE:BTCUSDT.P');
-  const [activeTab, setActiveTab] = useState<'scanner' | 'dex' | 'positions' | 'history'>('scanner');
+  const [activeTab, setActiveTab] = useState<'scanner' | 'dex' | 'positions' | 'history' | 'backtest'>('scanner');
   const logEndRef = useRef<HTMLDivElement>(null);
 
   const [aiConfidence, setAiConfidence] = useState(84);
+  
+  // Backtest State
+  const [backtestParams, setBacktestParams] = useState({ symbol: 'BTC/USDT', timeframe: '1h', limit: 1000 });
+  const [backtestResults, setBacktestResults] = useState<any>(null);
+  const [isBacktesting, setIsBacktesting] = useState(false);
+  const sessionIdRef = useRef(`session_${Math.random().toString(36).substring(7)}`);
 
   useEffect(() => {
     const newSocket = io();
@@ -147,15 +162,80 @@ export default function App() {
       setPnl(totalPnl);
     });
 
+    newSocket.on('trade_alert', (alert: { symbol: string, type: string, pnl: number, side: string }) => {
+      const isProfit = alert.pnl >= 0;
+      toast.custom((t) => (
+        <div className={cn(
+          "flex items-start gap-4 p-4 rounded-xl border shadow-2xl w-[350px]",
+          isProfit ? "bg-emerald-950/80 border-emerald-500/30" : "bg-rose-950/80 border-rose-500/30"
+        )}>
+          <div className={cn(
+            "p-2 rounded-lg shrink-0",
+            isProfit ? "bg-emerald-500/20 text-emerald-400" : "bg-rose-500/20 text-rose-400"
+          )}>
+            {isProfit ? <TrendingUp className="w-5 h-5" /> : <TrendingDown className="w-5 h-5" />}
+          </div>
+          <div className="flex-1 space-y-1">
+            <div className="flex items-center justify-between">
+              <p className="text-sm font-bold text-white">{alert.type} Hit</p>
+              <span className={cn(
+                "text-xs font-bold px-2 py-0.5 rounded-full",
+                isProfit ? "bg-emerald-500/20 text-emerald-400" : "bg-rose-500/20 text-rose-400"
+              )}>
+                {alert.side.toUpperCase()}
+              </span>
+            </div>
+            <p className="text-xs text-zinc-400 font-medium">{alert.symbol}</p>
+            <p className={cn(
+              "text-lg font-bold tracking-tight",
+              isProfit ? "text-emerald-400" : "text-rose-400"
+            )}>
+              {isProfit ? '+' : ''}${alert.pnl.toFixed(2)}
+            </p>
+          </div>
+          <button onClick={() => toast.dismiss(t)} className="text-zinc-500 hover:text-white transition-colors">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      ), { duration: 5000 });
+    });
+
     newSocket.on('bot_status', (status: { isRunning: boolean, isDemoMode: boolean }) => {
       setIsRunning(status.isRunning);
       setIsDemoMode(status.isDemoMode);
+    });
+
+    newSocket.on('account_stats', (stats: { balance: number, pnl: number }) => {
+      if (stats.balance > 0) setBalance(stats.balance);
+      setPnl(stats.pnl);
+    });
+
+    newSocket.on('backtest_started', () => {
+      setIsBacktesting(true);
+      setBacktestResults(null);
+    });
+
+    newSocket.on('backtest_result', (results: any) => {
+      setIsBacktesting(false);
+      setBacktestResults(results);
+    });
+
+    newSocket.on('backtest_error', (error: string) => {
+      setIsBacktesting(false);
+      toast.error(`Backtest Error: ${error}`);
     });
 
     return () => {
       newSocket.close();
     };
   }, []);
+
+  useEffect(() => {
+    if (socket) {
+      const sessionId = (isConnected && address) ? address : sessionIdRef.current;
+      socket.emit('auth', sessionId);
+    }
+  }, [isConnected, address, socket]);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -183,10 +263,23 @@ export default function App() {
   };
 
   const saveCredentials = () => {
-    if (!apiKey || !apiSecret) return;
-    socket?.emit('update_credentials', { apiKey, secret: apiSecret });
-    socket?.emit('set_mode', 'real');
+    if (apiKey && apiSecret) {
+      socket?.emit('update_credentials', { apiKey, secret: apiSecret });
+    }
+    
+    socket?.emit('update_ai_settings', {
+      geminiKey,
+      useGemini,
+      openAiKey,
+      useOpenAi
+    });
+
+    if (apiKey && apiSecret) {
+      socket?.emit('set_mode', 'real');
+    }
+    
     setShowApiModal(false);
+    toast.success('Settings updated successfully');
   };
 
   const stats = [
@@ -198,6 +291,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#050506] text-zinc-100 font-sans selection:bg-emerald-500/30">
+      <Toaster position="top-right" />
       {/* Navigation */}
       <nav className="border-b border-white/5 bg-black/40 backdrop-blur-xl sticky top-0 z-50">
         <div className="max-w-[1600px] mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
@@ -210,7 +304,7 @@ export default function App() {
           
           {/* Desktop Nav */}
           <div className="hidden lg:flex items-center gap-6">
-            <ConnectButton />
+            <ConnectButton showBalance={false} chainStatus="icon" />
 
             <div className="flex items-center gap-2 px-3 py-1.5 bg-white/5 border border-white/10 rounded-full">
               <button 
@@ -236,7 +330,10 @@ export default function App() {
               <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
               <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest">Live Market</span>
             </div>
-            <button className="p-2 hover:bg-white/5 rounded-lg transition-colors text-zinc-400 hover:text-white">
+            <button 
+              onClick={() => setShowApiModal(true)}
+              className="p-2 hover:bg-white/5 rounded-lg transition-colors text-zinc-400 hover:text-white"
+            >
               <Settings className="w-5 h-5" />
             </button>
           </div>
@@ -274,9 +371,14 @@ export default function App() {
               </button>
             </div>
             
-            <ConnectButton />
+            <div className="flex justify-center py-2">
+              <ConnectButton showBalance={false} chainStatus="icon" />
+            </div>
             
-            <button className="w-full py-4 bg-white/5 border border-white/10 text-zinc-300 text-sm font-bold rounded-xl flex items-center justify-center gap-2">
+            <button 
+              onClick={() => setShowApiModal(true)}
+              className="w-full py-4 bg-white/5 border border-white/10 text-zinc-300 text-sm font-bold rounded-xl flex items-center justify-center gap-2 hover:bg-white/10 transition-colors"
+            >
               <Settings className="w-5 h-5" /> SETTINGS
             </button>
           </div>
@@ -340,6 +442,7 @@ export default function App() {
                     { id: 'dex', label: 'DEX TRENDING', icon: Zap },
                     { id: 'positions', label: `ACTIVE POSITIONS (${activePositions.length})`, icon: LayoutList },
                     { id: 'history', label: 'TRADE HISTORY', icon: History },
+                    { id: 'backtest', label: 'BACKTEST', icon: BarChart3 },
                   ].map((tab) => (
                     <button 
                       key={tab.id}
@@ -353,7 +456,10 @@ export default function App() {
                     </button>
                   ))}
                 </div>
-                <button className="text-[10px] font-bold text-zinc-500 hover:text-white px-4 py-2 transition-colors flex items-center justify-center gap-2">
+                <button 
+                  onClick={() => socket?.emit('refresh_data')}
+                  className="text-[10px] font-bold text-zinc-500 hover:text-white px-4 py-2 transition-colors flex items-center justify-center gap-2"
+                >
                   <RefreshCw className="w-3 h-3" /> REFRESH DATA
                 </button>
               </div>
@@ -525,7 +631,10 @@ export default function App() {
                               {pos.pnl >= 0 ? '+' : ''}${pos.pnl.toFixed(2)}
                             </td>
                             <td className="px-6 py-4 text-right">
-                              <button className="px-3 py-1.5 bg-rose-500/10 text-rose-400 text-[10px] font-bold rounded-lg hover:bg-rose-500/20 transition-all border border-rose-500/20">
+                              <button 
+                                onClick={() => socket?.emit('close_position', pos.id)}
+                                className="px-3 py-1.5 bg-rose-500/10 text-rose-400 text-[10px] font-bold rounded-lg hover:bg-rose-500/20 transition-all border border-rose-500/20"
+                              >
                                 CLOSE
                               </button>
                             </td>
@@ -583,6 +692,119 @@ export default function App() {
                       )}
                     </tbody>
                   </table>
+                )}
+
+                {activeTab === 'backtest' && (
+                  <div className="p-4 space-y-6">
+                    <div className="flex flex-col sm:flex-row gap-4 items-end">
+                      <div className="space-y-2 flex-1">
+                        <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest">Symbol</label>
+                        <input 
+                          type="text" 
+                          value={backtestParams.symbol}
+                          onChange={(e) => setBacktestParams({...backtestParams, symbol: e.target.value})}
+                          className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-emerald-500/50 transition-colors"
+                        />
+                      </div>
+                      <div className="space-y-2 flex-1">
+                        <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest">Timeframe</label>
+                        <select 
+                          value={backtestParams.timeframe}
+                          onChange={(e) => setBacktestParams({...backtestParams, timeframe: e.target.value})}
+                          className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-emerald-500/50 transition-colors appearance-none"
+                        >
+                          <option value="15m">15m</option>
+                          <option value="1h">1h</option>
+                          <option value="4h">4h</option>
+                          <option value="1d">1d</option>
+                        </select>
+                      </div>
+                      <div className="space-y-2 flex-1">
+                        <label className="text-xs font-bold text-zinc-500 uppercase tracking-widest">Candles</label>
+                        <input 
+                          type="number" 
+                          value={backtestParams.limit}
+                          onChange={(e) => setBacktestParams({...backtestParams, limit: parseInt(e.target.value) || 1000})}
+                          className="w-full bg-black/40 border border-white/10 rounded-xl px-4 py-2 text-sm focus:outline-none focus:border-emerald-500/50 transition-colors"
+                        />
+                      </div>
+                      <button 
+                        onClick={() => socket?.emit('run_backtest', backtestParams)}
+                        disabled={isBacktesting}
+                        className="px-6 py-2.5 bg-emerald-500 text-black rounded-xl font-bold text-sm hover:bg-emerald-400 transition-all shadow-lg shadow-emerald-500/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 h-[42px]"
+                      >
+                        {isBacktesting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                        {isBacktesting ? 'RUNNING...' : 'RUN BACKTEST'}
+                      </button>
+                    </div>
+
+                    {backtestResults && (
+                      <div className="space-y-6 animate-in fade-in duration-500">
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                          <div className="bg-black/40 border border-white/5 rounded-xl p-4">
+                            <p className="text-xs text-zinc-500 font-bold uppercase tracking-wider mb-1">Total Return</p>
+                            <p className={cn("text-xl font-bold", backtestResults.totalReturn >= 0 ? "text-emerald-400" : "text-rose-400")}>
+                              {backtestResults.totalReturn >= 0 ? '+' : ''}{backtestResults.totalReturn.toFixed(2)}%
+                            </p>
+                          </div>
+                          <div className="bg-black/40 border border-white/5 rounded-xl p-4">
+                            <p className="text-xs text-zinc-500 font-bold uppercase tracking-wider mb-1">Win Rate</p>
+                            <p className="text-xl font-bold text-white">{backtestResults.winRate.toFixed(2)}%</p>
+                          </div>
+                          <div className="bg-black/40 border border-white/5 rounded-xl p-4">
+                            <p className="text-xs text-zinc-500 font-bold uppercase tracking-wider mb-1">Max Drawdown</p>
+                            <p className="text-xl font-bold text-rose-400">-{backtestResults.maxDrawdown.toFixed(2)}%</p>
+                          </div>
+                          <div className="bg-black/40 border border-white/5 rounded-xl p-4">
+                            <p className="text-xs text-zinc-500 font-bold uppercase tracking-wider mb-1">Total Trades</p>
+                            <p className="text-xl font-bold text-white">{backtestResults.totalTrades}</p>
+                          </div>
+                        </div>
+
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-sm text-left">
+                            <thead className="text-xs text-zinc-500 uppercase bg-black/40 border-y border-white/5">
+                              <tr>
+                                <th className="px-4 py-3 font-bold tracking-wider">Time</th>
+                                <th className="px-4 py-3 font-bold tracking-wider">Side</th>
+                                <th className="px-4 py-3 font-bold tracking-wider">Entry</th>
+                                <th className="px-4 py-3 font-bold tracking-wider">Exit</th>
+                                <th className="px-4 py-3 font-bold tracking-wider text-right">PnL</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-white/5">
+                              {backtestResults.trades.slice(0, 10).map((trade: any, i: number) => (
+                                <tr key={i} className="hover:bg-white/[0.02] transition-colors">
+                                  <td className="px-4 py-3 font-mono text-zinc-400">{format(new Date(trade.entryTime), 'MM/dd HH:mm')}</td>
+                                  <td className="px-4 py-3">
+                                    <span className={cn(
+                                      "px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-widest",
+                                      trade.side === 'buy' ? "bg-emerald-500/10 text-emerald-400" : "bg-rose-500/10 text-rose-400"
+                                    )}>
+                                      {trade.side}
+                                    </span>
+                                  </td>
+                                  <td className="px-4 py-3 font-mono">${trade.entryPrice.toFixed(2)}</td>
+                                  <td className="px-4 py-3 font-mono">${trade.exitPrice.toFixed(2)}</td>
+                                  <td className={cn(
+                                    "px-4 py-3 font-mono text-right font-bold",
+                                    trade.pnl >= 0 ? "text-emerald-400" : "text-rose-400"
+                                  )}>
+                                    {trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(2)}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                          {backtestResults.trades.length > 10 && (
+                            <div className="p-4 text-center text-xs text-zinc-500 font-medium">
+                              Showing last 10 of {backtestResults.trades.length} trades
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
@@ -674,38 +896,118 @@ export default function App() {
 
       {/* API Modal */}
       {showApiModal && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/80 backdrop-blur-sm">
-          <div className="bg-[#18181b] border border-white/10 rounded-2xl p-8 max-w-md w-full shadow-2xl space-y-6">
-            <div className="flex items-center gap-3">
-              <Shield className="w-6 h-6 text-rose-500" />
-              <h2 className="text-xl font-bold">Connect Real Account</h2>
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/80 backdrop-blur-sm overflow-y-auto">
+          <div className="bg-[#18181b] border border-white/10 rounded-2xl p-8 max-w-2xl w-full shadow-2xl space-y-8 my-8">
+            <div className="flex items-center gap-3 border-b border-white/10 pb-4">
+              <Settings className="w-6 h-6 text-emerald-500" />
+              <h2 className="text-xl font-bold">System Settings</h2>
             </div>
-            <p className="text-sm text-zinc-400">
-              Enter your Exchange API credentials to enable real trading. Your keys are sent securely to the backend and are not stored in the browser.
-            </p>
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">API Key</label>
-                <input 
-                  type="password" 
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  className="w-full bg-black/20 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-rose-500/50 transition-colors"
-                  placeholder="Enter API Key"
-                />
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+              {/* Exchange Settings */}
+              <div className="space-y-6">
+                <div className="flex items-center gap-2 text-rose-500">
+                  <Shield className="w-5 h-5" />
+                  <h3 className="font-bold">Exchange API (Real Trading)</h3>
+                </div>
+                <p className="text-xs text-zinc-400">
+                  Enter your Exchange API credentials to enable real trading. Keys are sent securely to the backend.
+                </p>
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">API Key</label>
+                    <input 
+                      type="password" 
+                      value={apiKey}
+                      onChange={(e) => setApiKey(e.target.value)}
+                      className="w-full bg-black/20 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-rose-500/50 transition-colors"
+                      placeholder="Enter Exchange API Key"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">API Secret</label>
+                    <input 
+                      type="password" 
+                      value={apiSecret}
+                      onChange={(e) => setApiSecret(e.target.value)}
+                      className="w-full bg-black/20 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-rose-500/50 transition-colors"
+                      placeholder="Enter Exchange API Secret"
+                    />
+                  </div>
+                </div>
               </div>
-              <div className="space-y-2">
-                <label className="text-xs font-semibold text-zinc-500 uppercase tracking-wider">API Secret</label>
-                <input 
-                  type="password" 
-                  value={apiSecret}
-                  onChange={(e) => setApiSecret(e.target.value)}
-                  className="w-full bg-black/20 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-rose-500/50 transition-colors"
-                  placeholder="Enter API Secret"
-                />
+
+              {/* AI Settings */}
+              <div className="space-y-6">
+                <div className="flex items-center gap-2 text-purple-500">
+                  <Brain className="w-5 h-5" />
+                  <h3 className="font-bold">AI Models</h3>
+                </div>
+                <p className="text-xs text-zinc-400">
+                  Activate multiple AI models for maximum profit and accuracy.
+                </p>
+                
+                <div className="space-y-4">
+                  {/* Gemini */}
+                  <div className="p-4 bg-white/5 border border-white/10 rounded-xl space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-bold text-white">Google Gemini</span>
+                      <button 
+                        onClick={() => setUseGemini(!useGemini)}
+                        className={cn(
+                          "w-10 h-5 rounded-full relative transition-colors",
+                          useGemini ? "bg-emerald-500" : "bg-zinc-700"
+                        )}
+                      >
+                        <div className={cn(
+                          "absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform",
+                          useGemini ? "translate-x-5" : "translate-x-0"
+                        )} />
+                      </button>
+                    </div>
+                    {useGemini && (
+                      <input 
+                        type="password" 
+                        value={geminiKey}
+                        onChange={(e) => setGeminiKey(e.target.value)}
+                        className="w-full bg-black/20 border border-white/10 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-emerald-500/50 transition-colors"
+                        placeholder="Gemini API Key (Optional if in .env)"
+                      />
+                    )}
+                  </div>
+
+                  {/* OpenAI */}
+                  <div className="p-4 bg-white/5 border border-white/10 rounded-xl space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-bold text-white">OpenAI (GPT-4)</span>
+                      <button 
+                        onClick={() => setUseOpenAi(!useOpenAi)}
+                        className={cn(
+                          "w-10 h-5 rounded-full relative transition-colors",
+                          useOpenAi ? "bg-emerald-500" : "bg-zinc-700"
+                        )}
+                      >
+                        <div className={cn(
+                          "absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full transition-transform",
+                          useOpenAi ? "translate-x-5" : "translate-x-0"
+                        )} />
+                      </button>
+                    </div>
+                    {useOpenAi && (
+                      <input 
+                        type="password" 
+                        value={openAiKey}
+                        onChange={(e) => setOpenAiKey(e.target.value)}
+                        className="w-full bg-black/20 border border-white/10 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-emerald-500/50 transition-colors"
+                        placeholder="OpenAI API Key"
+                      />
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
-            <div className="flex gap-3">
+
+            <div className="flex gap-3 pt-6 border-t border-white/10">
               <button 
                 onClick={() => setShowApiModal(false)}
                 className="flex-1 py-3 bg-white/5 hover:bg-white/10 rounded-xl text-sm font-bold transition-colors"
@@ -714,9 +1016,9 @@ export default function App() {
               </button>
               <button 
                 onClick={saveCredentials}
-                className="flex-1 py-3 bg-rose-500 hover:bg-rose-400 text-white rounded-xl text-sm font-bold transition-all shadow-lg shadow-rose-500/20"
+                className="flex-1 py-3 bg-emerald-500 hover:bg-emerald-400 text-black rounded-xl text-sm font-bold transition-all shadow-lg shadow-emerald-500/20"
               >
-                Connect & Enable
+                Save Settings
               </button>
             </div>
           </div>
